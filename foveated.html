@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>注视点渲染</title>
+<style>
+  :root {
+    --x: 50vw; --y: 50vh;   /* 当前"注视点" */
+    --core: 110px;          /* 高清区半径 */
+    --feather: 90px;        /* 羽化过渡带 */
+    --blur: 9px;            /* 周边模糊强度 */
+    --ink: #e8e6e1;
+    --bg: #0d0d0f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif;
+    overflow: hidden; cursor: crosshair;
+  }
+
+  /* ── 三层叠加：模糊底 / 中度 / 清晰顶 ───────────────── */
+  .stage { position: fixed; inset: 0; }
+  .layer {
+    position: absolute; inset: 0;
+    display: grid; place-items: center;
+    pointer-events: none;
+    will-change: mask-image;
+  }
+  .layer--far  { filter: blur(var(--blur)); pointer-events: auto; }
+  .layer--mid  { filter: blur(calc(var(--blur) / 3.5)); }
+  .layer--near { filter: none; }
+
+  /* 中间层：露出半径更大的一圈，形成离心率梯度 */
+  .layer--mid {
+    -webkit-mask-image: radial-gradient(circle at var(--x) var(--y),
+      #000 calc(var(--core) + var(--feather)),
+      transparent calc(var(--core) + var(--feather) * 2.6));
+    mask-image: radial-gradient(circle at var(--x) var(--y),
+      #000 calc(var(--core) + var(--feather)),
+      transparent calc(var(--core) + var(--feather) * 2.6));
+  }
+  /* 最上层：只露出中央凹那一小块 */
+  .layer--near {
+    -webkit-mask-image: radial-gradient(circle at var(--x) var(--y),
+      #000 var(--core), transparent calc(var(--core) + var(--feather)));
+    mask-image: radial-gradient(circle at var(--x) var(--y),
+      #000 var(--core), transparent calc(var(--core) + var(--feather)));
+  }
+  body.bypass .layer--mid,
+  body.bypass .layer--near { -webkit-mask-image: none; mask-image: none; }
+  body.bypass .layer--far  { filter: none; }
+
+  /* ── 模式一：阅读 ─────────────────────────────── */
+  .reader {
+    max-width: 44ch; padding: 0 24px;
+    font-size: clamp(17px, 2.2vw, 21px); line-height: 2;
+    letter-spacing: .04em; white-space: pre-wrap;
+    text-align: justify;
+  }
+
+  /* ── 模式二：搜索 ─────────────────────────────── */
+  .field {
+    display: grid; gap: 2px;
+    grid-template-columns: repeat(var(--cols), 1fr);
+    width: min(94vw, 900px);
+    font-size: clamp(16px, 2.4vw, 24px); line-height: 1.35;
+    user-select: none;
+  }
+  .field span { text-align: center; opacity: .88; }
+  .field span.hit { color: #ffd84d; }
+
+  /* ── 模式三：网格错觉 ──────────────────────────── */
+  .illusion {
+    --cell: 72px; --line: 12px; --dot: 5px;
+    width: 100%; height: 100%;
+    background-color: #000;
+    background-image:
+      radial-gradient(circle at calc(var(--line)/2) calc(var(--line)/2),
+        var(--dotcolor) var(--dot), transparent calc(var(--dot) + .5px)),
+      linear-gradient(#9a9a9a var(--line), transparent 0),
+      linear-gradient(90deg, #9a9a9a var(--line), transparent 0);
+    background-size: var(--cell) var(--cell);
+  }
+  .layer--far  .illusion { --dotcolor: #000; }  /* 周边：点是黑的 */
+  .layer--mid  .illusion { --dotcolor: #777; }
+  .layer--near .illusion { --dotcolor: #fff; }  /* 中央凹：点是白的 */
+  .layer .illusion { filter: none; }
+  .layer--far, .layer--mid { }
+  body[data-mode="illusion"] .layer--far,
+  body[data-mode="illusion"] .layer--mid { filter: none; }
+
+  /* ── UI ──────────────────────────────────────── */
+  .bar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 12px 16px; font-size: 13px;
+    background: linear-gradient(#0d0d0fee, #0d0d0f00);
+    pointer-events: none;
+  }
+  .bar > * { pointer-events: auto; }
+  button {
+    background: #ffffff14; color: #cfcdc8; border: 1px solid #ffffff1f;
+    padding: 6px 13px; border-radius: 999px; cursor: pointer;
+    font: inherit; transition: .15s;
+  }
+  button:hover { background: #ffffff24; color: #fff; }
+  button[aria-pressed="true"] { background: var(--ink); color: #0d0d0f; border-color: var(--ink); }
+  .spacer { flex: 1; min-width: 0; }
+  .readout {
+    font-variant-numeric: tabular-nums; color: #8d8a84; font-size: 12px;
+    letter-spacing: .03em;
+  }
+  .readout b { color: var(--ink); font-weight: 600; }
+
+  .dock {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;
+    display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+    padding: 14px 18px; font-size: 12px; color: #8d8a84;
+    background: linear-gradient(#0d0d0f00, #0d0d0fee);
+    pointer-events: none;
+  }
+  .dock > * { pointer-events: auto; }
+  .ctl { display: flex; align-items: center; gap: 8px; }
+  .ctl label { white-space: nowrap; }
+  input[type=range] { width: 110px; accent-color: var(--ink); }
+  kbd {
+    background: #ffffff1a; border: 1px solid #ffffff26; border-radius: 4px;
+    padding: 1px 6px; font: 11px ui-monospace, monospace; color: #cfcdc8;
+  }
+  .task { color: var(--ink); }
+  .task .target { font-size: 20px; color: #ffd84d; vertical-align: -2px; }
+</style>
+</head>
+<body data-mode="read">
+
+<div class="bar">
+  <button data-mode="read"     aria-pressed="true">阅读</button>
+  <button data-mode="search"   aria-pressed="false">搜索</button>
+  <button data-mode="illusion" aria-pressed="false">网格</button>
+  <span class="spacer"></span>
+  <span class="readout">高清区 <b id="deg">3.0</b>° 偏心 · 约占屏幕 <b id="pct">1.2</b>%</span>
+</div>
+
+<div class="stage" id="stage">
+  <div class="layer layer--far"  data-layer="far"></div>
+  <div class="layer layer--mid"  data-layer="mid"></div>
+  <div class="layer layer--near" data-layer="near"></div>
+</div>
+
+<div class="dock">
+  <span id="task"></span>
+  <span class="spacer"></span>
+  <span class="ctl"><label for="core">高清区</label><input type="range" id="core" min="30" max="400" value="110"></span>
+  <span class="ctl"><label for="feather">羽化</label><input type="range" id="feather" min="0" max="300" value="90"></span>
+  <span class="ctl"><label for="blur">周边模糊</label><input type="range" id="blur" min="0" max="24" value="9"></span>
+  <span>按住 <kbd>空格</kbd> 看原样</span>
+</div>
+
+<script>
+const root  = document.documentElement;
+const body  = document.body;
+const stage = document.getElementById('stage');
+const layers = [...stage.querySelectorAll('.layer')];
+
+/* ── 注视点：鼠标/触摸，带一点惯性 ───────────────────── */
+let tx = innerWidth / 2, ty = innerHeight / 2, cx = tx, cy = ty;
+
+const aim = (x, y) => { tx = x; ty = y; };
+addEventListener('pointermove', e => aim(e.clientX, e.clientY), { passive: true });
+addEventListener('touchmove', e => aim(e.touches[0].clientX, e.touches[0].clientY), { passive: true });
+
+(function tick() {
+  cx += (tx - cx) * 0.22;          // lerp：比鼠标慢一点点，像眼球的平滑追随
+  cy += (ty - cy) * 0.22;
+  root.style.setProperty('--x', cx.toFixed(1) + 'px');
+  root.style.setProperty('--y', cy.toFixed(1) + 'px');
+  requestAnimationFrame(tick);
+})();
+
+/* ── 内容生成 ─────────────────────────────────────── */
+const TEXT =
+`你以为自己一眼就看清了整个屏幕。其实没有。
+
+视网膜上真正高清的那一小块叫中央凹，只占视野中央大约两度——伸直手臂，大拇指指甲盖挡住的那一点点，就是你全部的高清画面。
+
+剩下的百分之九十九，都是模糊的、低分辨率的、几乎分不清颜色的周边视觉。
+
+那为什么平时毫无察觉？因为眼球每秒钟跳动三到四次，把那个小小的高清探头飞快甩向各处，大脑再把一地碎片缝成一张完整、稳定、处处清晰的假图。
+
+你此刻正在读的这段话，就是这样被缝出来的。`;
+
+/* 乱码层：保留标点和空白，汉字换成随机汉字 —— 轮廓还在，内容没了 */
+const scramble = s => s.replace(/[一-龥]/g,
+  () => String.fromCharCode(0x4e00 + (Math.random() * 0x51a5 | 0)));
+
+const GLYPHS = '◆◇○●△▲□■☆★▽▼◎◈⬡⬢✦✧⊕⊗※⁕❖';
+let searchState = null;
+
+function buildSearch() {
+  const cols = innerWidth < 640 ? 14 : 24, rows = innerWidth < 640 ? 18 : 15;
+  const n = cols * rows;
+  const target = GLYPHS[Math.random() * GLYPHS.length | 0];
+  const cells = Array.from({ length: n }, () => {
+    let g; do { g = GLYPHS[Math.random() * GLYPHS.length | 0]; } while (g === target);
+    return g;
+  });
+  cells[Math.random() * n | 0] = target;
+  searchState = { target, t0: performance.now(), done: false, cols };
+  return { cols, cells, target };
+}
+
+function render(mode) {
+  let html, sharpHtml;
+
+  if (mode === 'read') {
+    html      = `<div class="reader">${scramble(TEXT)}</div>`;
+    sharpHtml = `<div class="reader">${TEXT}</div>`;
+  } else if (mode === 'search') {
+    const { cols, cells, target } = buildSearch();
+    const grid = cells.map((g, i) =>
+      `<span data-i="${i}"${g === target ? ' class="hit"' : ''}>${g}</span>`).join('');
+    html = sharpHtml = `<div class="field" style="--cols:${cols}">${grid}</div>`;
+    document.getElementById('task').innerHTML =
+      `找出这一个：<span class="target">${target}</span> <span id="timer"></span>`;
+  } else {
+    html = sharpHtml = `<div class="illusion"></div>`;
+  }
+
+  layers.forEach(l => l.innerHTML = l.dataset.layer === 'near' ? sharpHtml : html);
+  if (mode !== 'search') document.getElementById('task').textContent =
+    mode === 'read' ? '把光标当成你的视线，慢慢扫过去' : '周边的白点自己会变黑 —— 这次是真的被画黑了';
+}
+
+/* 搜索模式：点中目标就停表 */
+stage.addEventListener('click', e => {
+  if (body.dataset.mode !== 'search' || !searchState || searchState.done) return;
+  const cell = e.target.closest('span');
+  if (!cell || !cell.classList.contains('hit')) return;
+  searchState.done = true;
+  const secs = ((performance.now() - searchState.t0) / 1000).toFixed(1);
+  document.getElementById('task').innerHTML =
+    `<span class="task">找到了，用了 <b>${secs}</b> 秒。` +
+    `现在按住 <kbd>空格</kbd> 关掉效果再找一次 —— 大概零点几秒。</span>`;
+}, true);
+
+/* ── 模式切换 ─────────────────────────────────────── */
+document.querySelectorAll('.bar button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode;
+    body.dataset.mode = mode;
+    document.querySelectorAll('.bar button').forEach(b =>
+      b.setAttribute('aria-pressed', b === btn));
+    render(mode);
+  });
+});
+
+/* ── 滑块 + 读数 ──────────────────────────────────── */
+const PX_PER_MM = 96 / 25.4, VIEW_DIST_MM = 600;  // 假设坐在 60cm 外
+function readout() {
+  const r = +document.getElementById('core').value;
+  const deg = Math.atan((r / PX_PER_MM) / VIEW_DIST_MM) * 180 / Math.PI;
+  const pct = (Math.PI * r * r) / (innerWidth * innerHeight) * 100;
+  document.getElementById('deg').textContent = deg.toFixed(1);
+  document.getElementById('pct').textContent = pct.toFixed(1);
+}
+['core', 'feather', 'blur'].forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => {
+    root.style.setProperty('--' + id, el.value + 'px');
+    readout();
+  });
+});
+readout();
+
+/* ── 空格：临时关掉，用来做对比 ────────────────────── */
+addEventListener('keydown', e => {
+  if (e.code === 'Space' && !e.repeat) { e.preventDefault(); body.classList.add('bypass'); }
+});
+addEventListener('keyup', e => {
+  if (e.code === 'Space') body.classList.remove('bypass');
+});
+
+addEventListener('resize', () => { if (body.dataset.mode === 'search') render('search'); });
+render('read');
+</script>
+</body>
+</html>

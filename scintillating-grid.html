@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>闪烁网格错觉</title>
+<style>
+  :root {
+    --cell: 72px;    /* 一个格子的周期 */
+    --line: 12px;    /* 灰条宽度 */
+    --dot: 5px;      /* 白点半径 */
+    --gray: #9a9a9a; /* 灰条颜色 */
+    --spin: 0deg;    /* 整体旋转 */
+    --dot-on: 1;     /* 1 = 有白点(闪烁网格) 0 = 无白点(经典 Hermann) */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 16px;
+    background: #141414; color: #ddd;
+    font: 15px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; gap: 24px;
+  }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; letter-spacing: .02em; }
+  .hint { color: #888; font-size: 13px; margin: -16px 0 0; text-align: center; max-width: 34em; }
+
+  /* ── 错觉本体 ───────────────────────────────── */
+  .stage {
+    width: min(90vw, 560px); aspect-ratio: 1;
+    overflow: hidden; border-radius: 4px; background: #000;
+  }
+  .grid {
+    width: 160%; height: 160%;
+    margin: -30% 0 0 -30%;            /* 旋转后不露边 */
+    transform: rotate(var(--spin));
+    background-color: #000;
+    background-image:
+      /* 1. 交叉点上的白点，中心对准灰条交叉处 */
+      radial-gradient(circle at calc(var(--line) / 2) calc(var(--line) / 2),
+        rgba(255,255,255,var(--dot-on)) var(--dot),
+        transparent calc(var(--dot) + .5px)),
+      /* 2. 横向灰条 */
+      linear-gradient(var(--gray) var(--line), transparent 0),
+      /* 3. 纵向灰条 */
+      linear-gradient(90deg, var(--gray) var(--line), transparent 0);
+    background-size: var(--cell) var(--cell);
+  }
+  /* ───────────────────────────────────────────── */
+
+  .panel {
+    width: min(90vw, 560px);
+    display: grid; grid-template-columns: 5.5em 1fr 3.5em;
+    gap: 10px 14px; align-items: center;
+    background: #1d1d1d; padding: 20px; border-radius: 10px;
+    font-size: 13px;
+  }
+  .panel label { color: #aaa; }
+  .panel output { color: #fff; font-variant-numeric: tabular-nums; text-align: right; }
+  input[type=range] { width: 100%; accent-color: #e8e8e8; }
+  .row-full { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; }
+  button {
+    background: #2e2e2e; color: #ddd; border: 1px solid #3d3d3d;
+    padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #3a3a3a; }
+  button[aria-pressed=true] { background: #e8e8e8; color: #141414; border-color: #e8e8e8; }
+</style>
+</head>
+<body>
+
+<h1>闪烁网格错觉</h1>
+<p class="hint">别盯着某一个点看 —— 让目光在网格上慢慢游走，余光里的白点就会变黑。</p>
+
+<div class="stage"><div class="grid" id="grid"></div></div>
+
+<div class="panel">
+  <label for="cell">格子大小</label>
+  <input type="range" id="cell" min="28" max="140" value="72">
+  <output id="cell-v">72px</output>
+
+  <label for="line">灰条宽度</label>
+  <input type="range" id="line" min="2" max="40" value="12">
+  <output id="line-v">12px</output>
+
+  <label for="dot">白点半径</label>
+  <input type="range" id="dot" min="0" max="20" value="5">
+  <output id="dot-v">5px</output>
+
+  <label for="gray">灰条亮度</label>
+  <input type="range" id="gray" min="0" max="255" value="154">
+  <output id="gray-v">154</output>
+
+  <label for="spin">旋转角度</label>
+  <input type="range" id="spin" min="0" max="90" value="0">
+  <output id="spin-v">0°</output>
+
+  <div class="row-full">
+    <button id="dots" aria-pressed="true">白点开</button>
+    <button id="r45">转 45° 看错觉消失</button>
+    <button id="reset">复位</button>
+  </div>
+</div>
+
+<script>
+  const root = document.documentElement;
+  const $ = id => document.getElementById(id);
+
+  const sliders = {
+    cell: v => [`${v}px`, `${v}px`],
+    line: v => [`${v}px`, `${v}px`],
+    dot:  v => [`${v}px`, `${v}px`],
+    gray: v => [`rgb(${v},${v},${v})`, v],
+    spin: v => [`${v}deg`, `${v}°`],
+  };
+
+  for (const [id, fmt] of Object.entries(sliders)) {
+    const el = $(id), out = $(id + '-v');
+    const apply = () => {
+      const [cssVal, label] = fmt(el.value);
+      root.style.setProperty('--' + (id === 'gray' ? 'gray' : id), cssVal);
+      out.textContent = label;
+    };
+    el.addEventListener('input', apply);
+    apply();
+  }
+
+  $('dots').addEventListener('click', e => {
+    const on = e.target.getAttribute('aria-pressed') !== 'true';
+    e.target.setAttribute('aria-pressed', on);
+    e.target.textContent = on ? '白点开' : '白点关（经典 Hermann）';
+    root.style.setProperty('--dot-on', on ? 1 : 0);
+  });
+
+  $('r45').addEventListener('click', () => {
+    const el = $('spin');
+    el.value = el.value == 45 ? 0 : 45;
+    el.dispatchEvent(new Event('input'));
+  });
+
+  $('reset').addEventListener('click', () => {
+    const defaults = { cell: 72, line: 12, dot: 5, gray: 154, spin: 0 };
+    for (const [id, v] of Object.entries(defaults)) {
+      $(id).value = v;
+      $(id).dispatchEvent(new Event('input'));
+    }
+  });
+</script>
+</body>
+</html>

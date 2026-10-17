@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>别移开视线</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body {
+    background: #07070a; color: #9b978f; cursor: none;
+    font: 13px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif;
+    user-select: none;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+
+  .hud {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+    display: flex; gap: 22px; align-items: baseline;
+    padding: 16px 20px; pointer-events: none;
+    font-variant-numeric: tabular-nums; letter-spacing: .06em;
+    text-transform: uppercase; font-size: 11px;
+  }
+  .hud b { color: #d8d4cc; font-size: 19px; font-weight: 500; letter-spacing: .02em; }
+  .hud .sp { flex: 1; }
+  .warn { color: #b4453c; opacity: 0; transition: opacity .25s; }
+  .warn.on { opacity: 1; }
+
+  .veil {
+    position: fixed; inset: 0; z-index: 10;
+    display: grid; place-content: center; justify-items: center;
+    gap: 18px; text-align: center; padding: 32px;
+    background: #07070aee; backdrop-filter: blur(3px);
+    cursor: pointer;
+  }
+  .veil.hidden { display: none; }
+  .veil h1 {
+    font-size: clamp(26px, 5vw, 42px); font-weight: 400; margin: 0;
+    color: #d8d4cc; letter-spacing: .14em;
+  }
+  .veil p { margin: 0; max-width: 32em; line-height: 1.9; color: #8d8980; }
+  .veil .rules { font-size: 12px; color: #6e6a63; line-height: 2.1; }
+  .veil .rules i { color: #a8a49c; font-style: normal; }
+  .veil .go {
+    margin-top: 10px; border: 1px solid #3a3a42; color: #d8d4cc;
+    padding: 11px 30px; border-radius: 999px; font-size: 13px;
+    letter-spacing: .1em; background: none;
+  }
+  .veil .score { color: #6e6a63; font-size: 12px; }
+  .veil .score b { color: #d8d4cc; font-weight: 500; }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div class="hud">
+  <span>存活 <b id="time">0.0</b></span>
+  <span>它们 <b id="count">0</b></span>
+  <span class="sp"></span>
+  <span class="warn" id="warn">● 太近了</span>
+</div>
+
+<div class="veil" id="veil">
+  <h1>别移开视线</h1>
+  <p>暗处有东西。只要你看着它，它就不会动。</p>
+  <div class="rules">
+    光标就是你的视线 —— <i>光圈里的东西会冻住</i><br>
+    看不见的，正在朝你走来<br>
+    甩动视线会触发<i>扫视抑制</i>：那一瞬间你是瞎的，而它们会前进一大步
+  </div>
+  <button class="go" id="go">开始</button>
+  <div class="score" id="best"></div>
+</div>
+
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let W = 0, H = 0, dpr = 1;
+
+function resize() {
+  dpr = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+resize();
+addEventListener('resize', resize);
+
+/* ── 注视点 ──────────────────────────────────────── */
+const GAZE_R  = 115;   // 光圈（= 冻结范围）
+const CATCH_R = 26;    // 被摸到的距离
+
+let gx = W / 2, gy = H / 2, px = gx, py = gy;
+addEventListener('pointermove', e => { gx = e.clientX; gy = e.clientY; }, { passive: true });
+addEventListener('touchmove', e => {
+  gx = e.touches[0].clientX; gy = e.touches[0].clientY;
+}, { passive: true });
+
+/* ── 实体 ────────────────────────────────────────── */
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+function spawn() {
+  // 从屏幕边缘出现，且离当前视线足够远
+  let x, y, tries = 0;
+  do {
+    const edge = Math.random() * 4 | 0;
+    const t = Math.random();
+    if (edge === 0) { x = t * W; y = -30; }
+    else if (edge === 1) { x = W + 30; y = t * H; }
+    else if (edge === 2) { x = t * W; y = H + 30; }
+    else { x = -30; y = t * H; }
+  } while (Math.hypot(x - gx, y - gy) < 260 && ++tries < 20);
+
+  return {
+    x, y,
+    speed: rnd(16, 34),              // px/s —— 慢，是压迫感不是动作游戏
+    h: rnd(26, 42),                  // 身高
+    sway: Math.random() * 6.28,      // 走路时的轻微摆动相位
+    frozen: false,
+  };
+}
+
+let things = [], t0 = 0, running = false, dead = false;
+let lastSac = -1e9, sacFlash = 0;
+
+function reset() {
+  things = Array.from({ length: 4 }, spawn);
+  t0 = performance.now();
+  running = true; dead = false;
+  px = gx; py = gy;
+  $('veil').classList.add('hidden');
+}
+
+/* ── 主循环 ──────────────────────────────────────── */
+let prev = performance.now();
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min((now - prev) / 1000, 0.05);
+  prev = now;
+
+  /* 扫视检测：视线移动得够快 → 这一瞬间你是瞎的 */
+  const vx = gx - px, vy = gy - py;
+  const speed = Math.hypot(vx, vy) / Math.max(dt, 1e-4);
+  px = gx; py = gy;
+
+  let sacJump = 0;
+  if (running && !dead && speed > 1800 && now - lastSac > 420) {
+    lastSac = now; sacFlash = 1;
+    sacJump = Math.min(speed / 1800, 3.2) * 26;   // 甩得越狠，它们越近
+  }
+  sacFlash = Math.max(0, sacFlash - dt * 5.5);
+
+  const elapsed = running && !dead ? (now - t0) / 1000 : 0;
+
+  /* 每 9 秒多一个 */
+  if (running && !dead && things.length < 4 + Math.floor(elapsed / 9)) things.push(spawn());
+
+  let nearest = 1e9;
+
+  for (const o of things) {
+    const dx = gx - o.x, dy = gy - o.y;
+    const d = Math.hypot(dx, dy) || 1;
+    nearest = Math.min(nearest, d);
+
+    // 在光圈内 —— 冻结。绝对静止，一个像素都不动。
+    o.frozen = d < GAZE_R;
+
+    if (running && !dead && !o.frozen) {
+      const step = o.speed * dt + sacJump;
+      o.x += dx / d * step;
+      o.y += dy / d * step;
+      o.sway += dt * 3.4;
+    }
+    if (running && !dead && d < CATCH_R) { dead = true; gameOver(elapsed); }
+  }
+
+  draw(elapsed, nearest);
+  if (running) {
+    $('time').textContent = elapsed.toFixed(1);
+    $('count').textContent = things.length;
+    $('warn').classList.toggle('on', !dead && nearest < 150);
+  }
+}
+
+/* ── 绘制 ────────────────────────────────────────── */
+function draw(elapsed, nearest) {
+  ctx.clearRect(0, 0, W, H);
+
+  // 背景 + 以视线为中心的微弱照明
+  ctx.fillStyle = '#07070a';
+  ctx.fillRect(0, 0, W, H);
+
+  const glow = ctx.createRadialGradient(gx, gy, 0, gx, gy, GAZE_R * 2.4);
+  glow.addColorStop(0,   'rgba(150,152,165,0.085)');
+  glow.addColorStop(0.42,'rgba(120,122,135,0.034)');
+  glow.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const o of things) {
+    const d = Math.hypot(gx - o.x, gy - o.y);
+    // 离视线越远 → 越接近背景色、越柔化。这就是周边视觉。
+    const k = Math.min(d / (GAZE_R * 2.2), 1);
+    const lum = 0.30 - k * 0.19;
+    const blur = k * 9;
+    const sway = o.frozen ? 0 : Math.sin(o.sway) * 1.6;
+
+    ctx.save();
+    ctx.shadowColor = `rgba(170,175,195,${0.5 - k * 0.3})`;
+    ctx.shadowBlur = blur;
+    ctx.fillStyle = `rgba(${210 * lum | 0},${212 * lum | 0},${228 * lum | 0},${0.95 - k * 0.12})`;
+    silhouette(o.x + sway, o.y, o.h);
+    ctx.restore();
+  }
+
+  // 视线本体：一圈极细的环
+  ctx.strokeStyle = 'rgba(190,192,205,0.13)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(gx, gy, GAZE_R, 0, 6.2832); ctx.stroke();
+  ctx.fillStyle = 'rgba(216,212,204,0.55)';
+  ctx.beginPath(); ctx.arc(gx, gy, 2.2, 0, 6.2832); ctx.fill();
+
+  // 四周压暗
+  const vig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.32,
+                                       W / 2, H / 2, Math.max(W, H) * 0.78);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.72)');
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+
+  // 扫视抑制：那一瞬间，视觉被掐断
+  if (sacFlash > 0) {
+    ctx.fillStyle = `rgba(7,7,10,${sacFlash * 0.82})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // 贴近时的脉动
+  if (running && !dead && nearest < 150) {
+    const p = (1 - nearest / 150) * (0.5 + 0.5 * Math.sin(performance.now() / 110));
+    ctx.fillStyle = `rgba(150,40,34,${p * 0.1})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+/* 一个很小的人影：头 + 细长的身子 */
+function silhouette(x, y, h) {
+  const w = h * 0.26, head = h * 0.19;
+  ctx.beginPath();
+  ctx.arc(x, y - h / 2 + head * 0.6, head * 0.62, 0, 6.2832);
+  ctx.fill();
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(x - w / 2, y - h / 2 + head * 1.5, w, h - head * 1.5, [w * 0.45, w * 0.45, w * 0.2, w * 0.2]);
+  } else {
+    ctx.rect(x - w / 2, y - h / 2 + head * 1.5, w, h - head * 1.5);
+  }
+  ctx.fill();
+}
+
+/* ── 开始 / 结束 ─────────────────────────────────── */
+const BEST_KEY = 'dont-blink-best';
+const readBest = () => { try { return +localStorage.getItem(BEST_KEY) || 0; } catch { return 0; } };
+const writeBest = v => { try { localStorage.setItem(BEST_KEY, v); } catch {} };
+
+function showBest(now) {
+  const b = readBest();
+  $('best').innerHTML = b
+    ? (now != null ? `这次 <b>${now.toFixed(1)}</b> 秒 · ` : '') + `最久 <b>${b.toFixed(1)}</b> 秒`
+    : '';
+}
+
+function gameOver(elapsed) {
+  running = false;
+  if (elapsed > readBest()) writeBest(elapsed);
+  const v = $('veil');
+  v.querySelector('h1').textContent = '它碰到你了';
+  v.querySelector('p').textContent = '它一直在那儿。只是你没在看。';
+  v.querySelector('.go').textContent = '再来';
+  showBest(elapsed);
+  setTimeout(() => v.classList.remove('hidden'), 620);
+}
+
+$('go').addEventListener('click', e => { e.stopPropagation(); reset(); });
+$('veil').addEventListener('click', () => { if (!running) reset(); });
+addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); if (!running) reset(); }
+});
+
+showBest();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
